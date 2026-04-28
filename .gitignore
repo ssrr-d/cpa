@@ -1,0 +1,16 @@
+# APIキー・環境変数
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# 生成ファイル
+design.md

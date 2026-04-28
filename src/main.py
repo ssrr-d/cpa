@@ -23,7 +23,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-o", "--output",
         default=None,
-        help="出力ファイルパス (default: design.md)",
+        help="出力ファイルパス (default: {入力名}_design.md)",
     )
     parser.add_argument(
         "-r", "--recursive",
@@ -130,7 +130,11 @@ def main() -> int:
     markdown = render(file_infos)
 
     # 5. 出力ファイルの書き込み (6.2)
-    output_path = Path(args.output) if args.output else Path("design.md")
+    if args.output:
+        output_path = Path(args.output)
+    else:
+        base_name = Path(args.path).stem
+        output_path = Path(f"{base_name}_design.md")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(markdown, encoding="utf-8")
 

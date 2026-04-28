@@ -39,7 +39,14 @@ def parse_file(filepath: Path) -> cindex.TranslationUnit:
 
     # エンコーディングを正規化してUTF-8としてlibclangに渡す
     utf8_content = _read_as_utf8(filepath)
-    unsaved = [(str(filepath), utf8_content.decode("utf-8"))]
+    source = utf8_content.decode("utf-8")
+
+    # stdafx.h / pch.h などのプリコンパイル済みヘッダが見つからない場合に備え、
+    # 空の仮ファイルとして unsaved_files に登録して libclang のエラーを抑制する
+    PCH_HEADERS = ["stdafx.h", "pch.h", "StdAfx.h", "Stdafx.h"]
+    unsaved = [(str(filepath), source)]
+    for pch in PCH_HEADERS:
+        unsaved.append((pch, ""))
 
     tu = index.parse(
         str(filepath),
@@ -49,6 +56,7 @@ def parse_file(filepath: Path) -> cindex.TranslationUnit:
     )
 
     # パースエラー・警告を stderr に出力（処理は継続）
+    # ただし PCH 関連の "file not found" は抑制済みのため除外
     errors = [d for d in tu.diagnostics if d.severity >= cindex.Diagnostic.Warning]
     for diag in errors:
         severity = "エラー" if diag.severity >= cindex.Diagnostic.Error else "警告"

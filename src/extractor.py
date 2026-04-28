@@ -12,6 +12,7 @@ from models import (
     ClassInfo,
     FileInfo,
     GlobalVarInfo,
+    GlobalVarEffect,
     IncludeInfo,
     MemberVarInfo,
     MethodInfo,
@@ -50,15 +51,88 @@ def _get_doxygen_comment(cursor: cindex.Cursor) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# メソッド本体解析: 内部処理・グローバル変数影響 (新規)
+# ---------------------------------------------------------------------------
+
+def _collect_method_body_info(
+    cursor: cindex.Cursor,
+    global_names: set[str],
+) -> tuple[list[str], list["GlobalVarEffect"]]:
+    """
+    メソッド本体のASTを走査して内部処理概要とグローバル変数への影響を収集する。
+
+    Returns:
+        (body_summary, global_var_effects)
+        - body_summary: 呼び出し関数名のリスト
+        - global_var_effects: GlobalVarEffect のリスト
+    """
+    calls: list[str] = []
+    effects_map: dict[str, str] = {}  # var_name -> "read" | "write" | "read/write"
+
+    def _walk(node: cindex.Cursor, in_lhs: bool = False) -> None:
+        # 関数呼び出し収集
+        if node.kind == cindex.CursorKind.CALL_EXPR and node.spelling:
+            if node.spelling not in calls:
+                calls.append(node.spelling)
+
+        # グローバル変数の読み書き検出
+        if node.kind == cindex.CursorKind.BINARY_OPERATOR:
+            children = list(node.get_children())
+            if len(children) == 2:
+                lhs, rhs = children
+                # 左辺への代入 → write
+                if lhs.kind == cindex.CursorKind.DECL_REF_EXPR and lhs.spelling in global_names:
+                    var = lhs.spelling
+                    effects_map[var] = "read/write" if effects_map.get(var) == "read" else "write"
+                # 右辺での参照 → read
+                _collect_reads(rhs, global_names, effects_map)
+                return  # 子は上で処理済み
+
+        # 代入以外での参照 → read
+        if node.kind == cindex.CursorKind.DECL_REF_EXPR and node.spelling in global_names:
+            var = node.spelling
+            if var not in effects_map:
+                effects_map[var] = "read"
+            elif effects_map[var] == "write":
+                effects_map[var] = "read/write"
+
+        for child in node.get_children():
+            _walk(child)
+
+    def _collect_reads(node: cindex.Cursor, names: set[str], em: dict[str, str]) -> None:
+        if node.kind == cindex.CursorKind.DECL_REF_EXPR and node.spelling in names:
+            var = node.spelling
+            if var not in em:
+                em[var] = "read"
+            elif em[var] == "write":
+                em[var] = "read/write"
+        for child in node.get_children():
+            _collect_reads(child, names, em)
+
+    # メソッド本体（COMPOUND_STMT）を走査
+    for child in cursor.get_children():
+        if child.kind == cindex.CursorKind.COMPOUND_STMT:
+            _walk(child)
+
+    effects = [GlobalVarEffect(var_name=k, effect=v) for k, v in effects_map.items()]
+    return calls, effects
+
+
+# ---------------------------------------------------------------------------
 # クラス・メンバ・メソッド抽出 (4.1)
 # ---------------------------------------------------------------------------
 
-def _extract_method(cursor: cindex.Cursor) -> MethodInfo:
+def _extract_method(cursor: cindex.Cursor, global_names: set[str] | None = None) -> MethodInfo:
     """メソッドカーソルから MethodInfo を生成する。"""
     params: list[tuple[str, str]] = []
     for child in cursor.get_children():
         if child.kind == cindex.CursorKind.PARM_DECL:
             params.append((child.type.spelling, child.spelling))
+
+    body_summary: list[str] = []
+    global_var_effects: list = []
+    if global_names is not None:
+        body_summary, global_var_effects = _collect_method_body_info(cursor, global_names)
 
     return MethodInfo(
         name=cursor.spelling,
@@ -66,10 +140,12 @@ def _extract_method(cursor: cindex.Cursor) -> MethodInfo:
         parameters=params,
         access=_ACCESS_MAP.get(cursor.access_specifier, "public"),
         comment=_get_doxygen_comment(cursor),
+        body_summary=body_summary,
+        global_var_effects=global_var_effects,
     )
 
 
-def _extract_class(cursor: cindex.Cursor, namespace: str | None) -> ClassInfo:
+def _extract_class(cursor: cindex.Cursor, namespace: str | None, global_names: set[str] | None = None) -> ClassInfo:
     """クラスカーソルから ClassInfo を生成する。"""
     bases: list[str] = []
     members: list[MemberVarInfo] = []
@@ -98,7 +174,7 @@ def _extract_class(cursor: cindex.Cursor, namespace: str | None) -> ClassInfo:
             cindex.CursorKind.DESTRUCTOR,
             cindex.CursorKind.FUNCTION_TEMPLATE,
         ):
-            methods.append(_extract_method(child))
+            methods.append(_extract_method(child, global_names))
 
     return ClassInfo(
         name=cursor.spelling,
@@ -305,6 +381,7 @@ def _traverse(
     filepath: Path,
     namespace_stack: list[str],
     classes: list[ClassInfo],
+    global_names: set[str] | None = None,
 ) -> None:
     """ASTを再帰トラバースしてクラスと名前空間を収集する。"""
     # 対象ファイルのノードのみ処理（インクルード先は除外）
@@ -314,7 +391,7 @@ def _traverse(
     if cursor.kind == cindex.CursorKind.NAMESPACE:
         namespace_stack.append(cursor.spelling)
         for child in cursor.get_children():
-            _traverse(child, filepath, namespace_stack, classes)
+            _traverse(child, filepath, namespace_stack, classes, global_names)
         namespace_stack.pop()
         return
 
@@ -326,11 +403,11 @@ def _traverse(
         # 定義のあるクラスのみ（前方宣言を除外）
         if cursor.is_definition():
             ns = "::".join(namespace_stack) if namespace_stack else None
-            classes.append(_extract_class(cursor, ns))
+            classes.append(_extract_class(cursor, ns, global_names))
         return  # クラス内のネストは _extract_class が処理
 
     for child in cursor.get_children():
-        _traverse(child, filepath, namespace_stack, classes)
+        _traverse(child, filepath, namespace_stack, classes, global_names)
 
 
 def extract(tu: cindex.TranslationUnit, filepath: Path) -> FileInfo:
@@ -346,15 +423,16 @@ def extract(tu: cindex.TranslationUnit, filepath: Path) -> FileInfo:
     """
     filepath = filepath.resolve()
 
+    # グローバル変数を先に抽出してクラス解析に名前セットを渡す (4.3)
+    global_vars = _extract_global_vars(tu, filepath)
+    global_names = {v.name for v in global_vars}
+
     # クラス抽出 (4.1, 4.2)
     classes: list[ClassInfo] = []
-    _traverse(tu.cursor, filepath, [], classes)
+    _traverse(tu.cursor, filepath, [], classes, global_names)
 
     # include抽出 (4.2)
     includes = _extract_includes(tu)
-
-    # グローバル変数抽出 (4.3)
-    global_vars = _extract_global_vars(tu, filepath)
 
     return FileInfo(
         filepath=filepath,

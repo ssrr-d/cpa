@@ -4,6 +4,12 @@ from pathlib import Path
 
 
 @dataclass
+class GlobalVarEffect:
+    var_name: str
+    effect: str  # "read" | "write" | "read/write"
+
+
+@dataclass
 class MethodInfo:
     name: str
     return_type: str
@@ -11,6 +17,8 @@ class MethodInfo:
     access: str  # "public" | "protected" | "private"
     comment: str | None = None
     ai_description: str | None = None
+    body_summary: list[str] = field(default_factory=list)   # 内部処理の概要（呼び出し関数など）
+    global_var_effects: list[GlobalVarEffect] = field(default_factory=list)  # グローバル変数への影響
 
 
 @dataclass

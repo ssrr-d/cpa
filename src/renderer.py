@@ -61,13 +61,18 @@ def _render_method_table(methods: list[MethodInfo]) -> str:
     if not methods:
         return ""
     lines = [
-        "| 名前 | 引数 | 戻り値型 | 説明 |",
-        "| --- | --- | --- | --- |",
+        "| 名前 | 引数 | 戻り値型 | 役割 | 内部処理 | グローバル変数への影響 |",
+        "| --- | --- | --- | --- | --- | --- |",
     ]
     for m in methods:
         params = ", ".join(f"{t} {n}" if n else t for t, n in m.parameters)
-        desc = m.comment or ""
-        lines.append(f"| `{m.name}` | `{params}` | `{m.return_type}` | {desc} |")
+        role = m.comment or (m.ai_description or "")
+        body = ", ".join(f"`{c}()`" for c in m.body_summary) if m.body_summary else "-"
+        if m.global_var_effects:
+            effects = ", ".join(f"`{e.var_name}` ({e.effect})" for e in m.global_var_effects)
+        else:
+            effects = "-"
+        lines.append(f"| `{m.name}` | `{params}` | `{m.return_type}` | {role} | {body} | {effects} |")
 
     # AI descriptions for individual methods (Requirement 7.3)
     ai_notes = [m for m in methods if m.ai_description]

@@ -28,6 +28,10 @@ PROVIDER_DEFAULT_MODELS: dict[str, str] = {
 VALID_PROVIDERS = set(PROVIDER_ENV_VARS.keys())
 
 
+class QuotaExceededError(Exception):
+    """APIクォータ超過時に送出される例外。"""
+
+
 # ---------------------------------------------------------------------------
 # AIConfig dataclass (8.1)
 # ---------------------------------------------------------------------------
@@ -140,7 +144,11 @@ def _call_openai(prompt: str, config: AIConfig) -> str | None:
         )
         return response.choices[0].message.content
     except Exception as e:
+        msg = str(e)
         print(f"警告: OpenAI API呼び出し失敗: {e}", file=sys.stderr)
+        # クォータ超過・認証エラーは継続しても無駄なので上位に伝える
+        if "quota" in msg.lower() or "insufficient_quota" in msg.lower() or "429" in msg:
+            raise QuotaExceededError(f"OpenAI クォータ超過: {e}") from e
         return None
 
 
@@ -206,17 +214,29 @@ def analyze(file_infos: list[FileInfo], config: AIConfig) -> list[FileInfo]:
     for file_info in file_infos:
         for cls in file_info.classes:
             # クラス説明
-            cls.ai_description = _generate(_build_class_prompt(cls), config)
+            try:
+                cls.ai_description = _generate(_build_class_prompt(cls), config)
+            except QuotaExceededError as e:
+                print(f"エラー: {e}\nAI解析を中断します。", file=sys.stderr)
+                return file_infos
 
             # パブリックメソッド説明
             for method in cls.methods:
                 if method.access == "public":
-                    method.ai_description = _generate(
-                        _build_method_prompt(method, cls.name), config
-                    )
+                    try:
+                        method.ai_description = _generate(
+                            _build_method_prompt(method, cls.name), config
+                        )
+                    except QuotaExceededError as e:
+                        print(f"エラー: {e}\nAI解析を中断します。", file=sys.stderr)
+                        return file_infos
 
         # グローバル変数説明
         for var in file_info.global_vars:
-            var.ai_description = _generate(_build_global_var_prompt(var), config)
+            try:
+                var.ai_description = _generate(_build_global_var_prompt(var), config)
+            except QuotaExceededError as e:
+                print(f"エラー: {e}\nAI解析を中断します。", file=sys.stderr)
+                return file_infos
 
     return file_infos
